@@ -294,25 +294,19 @@ jobs:
           
           def generate_test_for_function(func_info):
               """Generate test for a single function"""
-              prompt = f"""Generate a comprehensive unit test for this Go function.
-
-Package: {func_info['package']}
-Function: {func_info['name']}
-
-Function code:
-```go
-{func_info['code']}
-```
-
-Requirements:
-1. Use table-driven test pattern where appropriate
-2. Test multiple scenarios including edge cases
-3. Test error conditions if function returns errors
-4. Use standard testing package
-5. Function name should be Test{func_info['name']}
-6. Return ONLY the test function code, no package or import statements
-
-Generate the test code:"""
+              code_block = "```go\\n" + func_info['code'] + "\\n```"
+              prompt = "Generate a comprehensive unit test for this Go function.\\n\\n"
+              prompt += "Package: " + func_info['package'] + "\\n"
+              prompt += "Function: " + func_info['name'] + "\\n\\n"
+              prompt += "Function code:\\n" + code_block + "\\n\\n"
+              prompt += "Requirements:\\n"
+              prompt += "1. Use table-driven test pattern where appropriate\\n"
+              prompt += "2. Test multiple scenarios including edge cases\\n"
+              prompt += "3. Test error conditions if function returns errors\\n"
+              prompt += "4. Use standard testing package\\n"
+              prompt += "5. Function name should be Test" + func_info['name'] + "\\n"
+              prompt += "6. Return ONLY the test function code, no package or import statements\\n\\n"
+              prompt += "Generate the test code:"
               
               print(f"Generating test for {func_info['name']}...", file=sys.stderr)
               
