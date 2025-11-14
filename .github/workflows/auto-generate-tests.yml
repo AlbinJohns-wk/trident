@@ -128,142 +128,76 @@ jobs:
           echo "has_changes=true" >> $GITHUB_OUTPUT
           echo "file_count=$(echo "$FILTERED_FILES" | grep -c . || echo 0)" >> $GITHUB_OUTPUT
 
-      - name: Extract functions from changed files
+      - name: Extract functions from git diff
         if: steps.changes.outputs.has_changes == 'true'
         id: extract
         run: |
-          # Create script to extract function signatures
-          cat > /tmp/extract_functions.go << 'SCRIPT'
-          package main
+          # Get the diff and extract new/modified function signatures
+          git fetch origin ${{ steps.base.outputs.ref }}
+          DIFF_OUTPUT=$(git diff origin/${{ steps.base.outputs.ref }}...HEAD)
           
-          import (
-            "encoding/json"
-            "fmt"
-            "go/ast"
-            "go/parser"
-            "go/token"
-            "os"
-            "strings"
-          )
+          # Extract function names from diff (lines starting with +func)
+          # This captures: +func FunctionName(...) or +func (receiver) FunctionName(...)
+          FUNCTIONS=$(echo "$DIFF_OUTPUT" | grep -E '^\+func [A-Z]' | sed 's/^+func //' | awk '{print $1}' | sed 's/[(){].*$//' | sort -u)
           
-          type FunctionInfo struct {
-            Name       string `json:"name"`
-            File       string `json:"file"`
-            Package    string `json:"package"`
-            Signature  string `json:"signature"`
-            IsExported bool   `json:"is_exported"`
-            StartLine  int    `json:"start_line"`
-            EndLine    int    `json:"end_line"`
-          }
+          if [ -z "$FUNCTIONS" ]; then
+            echo "No new/modified exported functions found in diff"
+            echo "[]" > /tmp/functions.json
+            echo "function_count=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           
-          func main() {
-            if len(os.Args) < 2 {
-              return
-            }
-            
-            filename := os.Args[1]
-            fset := token.NewFileSet()
-            node, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
-            if err != nil {
-              return
-            }
-            
-            var functions []FunctionInfo
-            
-            ast.Inspect(node, func(n ast.Node) bool {
-              switch fn := n.(type) {
-              case *ast.FuncDecl:
-                sig := extractSignature(fset, fn)
-                functions = append(functions, FunctionInfo{
-                  Name:       fn.Name.Name,
-                  File:       filename,
-                  Package:    node.Name.Name,
-                  Signature:  sig,
-                  IsExported: fn.Name.IsExported(),
-                  StartLine:  fset.Position(fn.Pos()).Line,
-                  EndLine:    fset.Position(fn.End()).Line,
-                })
-              }
-              return true
-            })
-            
-            json.NewEncoder(os.Stdout).Encode(functions)
-          }
+          echo "Found functions in diff:"
+          echo "$FUNCTIONS"
           
-          func extractSignature(fset *token.FileSet, fn *ast.FuncDecl) string {
-            var parts []string
-            
-            if fn.Recv != nil {
-              parts = append(parts, fmt.Sprintf("(%s)", formatFieldList(fset, fn.Recv)))
-            }
-            
-            parts = append(parts, fn.Name.Name)
-            parts = append(parts, fmt.Sprintf("(%s)", formatFieldList(fset, fn.Type.Params)))
-            
-            if fn.Type.Results != nil {
-              parts = append(parts, formatFieldList(fset, fn.Type.Results))
-            }
-            
-            return strings.Join(parts, " ")
-          }
+          # Build JSON array with function info
+          FUNCTION_JSON='['
+          FIRST=true
           
-          func formatFieldList(fset *token.FileSet, fl *ast.FieldList) string {
-            if fl == nil || len(fl.List) == 0 {
-              return ""
-            }
-            var parts []string
-            for _, f := range fl.List {
-              typeStr := formatExpr(fset, f.Type)
-              if len(f.Names) > 0 {
-                for _, name := range f.Names {
-                  parts = append(parts, name.Name+" "+typeStr)
-                }
-              } else {
-                parts = append(parts, typeStr)
-              }
-            }
-            return strings.Join(parts, ", ")
-          }
-          
-          func formatExpr(fset *token.FileSet, expr ast.Expr) string {
-            switch t := expr.(type) {
-            case *ast.Ident:
-              return t.Name
-            case *ast.StarExpr:
-              return "*" + formatExpr(fset, t.X)
-            case *ast.SelectorExpr:
-              return formatExpr(fset, t.X) + "." + t.Sel.Name
-            case *ast.ArrayType:
-              return "[]" + formatExpr(fset, t.Elt)
-            case *ast.MapType:
-              return "map[" + formatExpr(fset, t.Key) + "]" + formatExpr(fset, t.Value)
-            default:
-              return "interface{}"
-            }
-          }
-          SCRIPT
-          
-          # Extract functions from all changed files
-          ALL_FUNCTIONS='[]'
           while IFS= read -r file; do
             if [ -n "$file" ] && [ -f "$file" ]; then
-              FUNCS=$(go run /tmp/extract_functions.go "$file" 2>/dev/null || echo '[]')
-              # Merge JSON arrays
-              ALL_FUNCTIONS=$(echo "$ALL_FUNCTIONS" "$FUNCS" | jq -s 'add')
+              # Get package name
+              PKG=$(head -20 "$file" | grep "^package " | awk '{print $2}')
+              
+              # Extract each function's code from the file
+              for func_name in $FUNCTIONS; do
+                # Check if this function exists in this file
+                if grep -q "^func.*$func_name" "$file" 2>/dev/null; then
+                  # Extract the function code (simple approach - get function and next 50 lines)
+                  FUNC_CODE=$(awk "/^func.*$func_name/,/^}/" "$file" | head -100)
+                  
+                  if [ -n "$FUNC_CODE" ]; then
+                    # Escape for JSON
+                    FUNC_CODE_ESCAPED=$(echo "$FUNC_CODE" | jq -Rs .)
+                    
+                    if [ "$FIRST" = true ]; then
+                      FIRST=false
+                    else
+                      FUNCTION_JSON+=","
+                    fi
+                    
+                    FUNCTION_JSON+="{\"name\":\"$func_name\",\"file\":\"$file\",\"package\":\"$PKG\",\"code\":$FUNC_CODE_ESCAPED}"
+                  fi
+                fi
+              done
             fi
           done < /tmp/changed_files.txt
           
-          echo "$ALL_FUNCTIONS" > /tmp/functions.json
-          echo "Function count: $(echo "$ALL_FUNCTIONS" | jq 'length')"
+          FUNCTION_JSON+=']'
+          
+          echo "$FUNCTION_JSON" > /tmp/functions.json
+          FUNC_COUNT=$(echo "$FUNCTION_JSON" | jq 'length')
+          echo "Function count: $FUNC_COUNT"
+          echo "function_count=$FUNC_COUNT" >> $GITHUB_OUTPUT
 
       - name: Generate unit tests using AI
-        if: steps.changes.outputs.has_changes == 'true'
+        if: steps.extract.outputs.function_count != '0'
         id: generate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # Create test generation script
+          # Create simplified test generation script
           cat > /tmp/generate_tests.py << 'SCRIPT'
           import json
           import os
@@ -281,7 +215,7 @@ jobs:
               
               payload = {
                   "messages": [
-                      {"role": "system", "content": "You are an expert Go test engineer. Generate comprehensive unit tests using Go's testing package and table-driven test patterns."},
+                      {"role": "system", "content": "You are an expert Go test engineer. Generate comprehensive unit tests using Go's testing package and table-driven test patterns. Return ONLY the test code without explanations or markdown formatting."},
                       {"role": "user", "content": prompt}
                   ],
                   "model": model,
@@ -290,18 +224,17 @@ jobs:
               }
               
               try:
-                  # Try GitHub Models API first
                   response = requests.post(
                       "https://models.inference.ai.azure.com/chat/completions",
                       headers=headers,
                       json=payload,
-                      timeout=30
+                      timeout=60
                   )
                   
                   if response.status_code == 200:
                       return response.json()["choices"][0]["message"]["content"]
                   else:
-                      print(f"GitHub API failed: {response.status_code}", file=sys.stderr)
+                      print(f"GitHub API failed: {response.status_code} - {response.text}", file=sys.stderr)
                       return None
               except Exception as e:
                   print(f"GitHub API error: {e}", file=sys.stderr)
@@ -321,7 +254,7 @@ jobs:
               payload = {
                   "model": model,
                   "messages": [
-                      {"role": "system", "content": "You are an expert Go test engineer. Generate comprehensive unit tests using Go's testing package and table-driven test patterns."},
+                      {"role": "system", "content": "You are an expert Go test engineer. Generate comprehensive unit tests using Go's testing package and table-driven test patterns. Return ONLY the test code without explanations or markdown formatting."},
                       {"role": "user", "content": prompt}
                   ],
                   "temperature": 0.3,
@@ -333,50 +266,21 @@ jobs:
                       "https://api.openai.com/v1/chat/completions",
                       headers=headers,
                       json=payload,
-                      timeout=30
+                      timeout=60
                   )
                   
                   if response.status_code == 200:
                       return response.json()["choices"][0]["message"]["content"]
-                  return None
+                  else:
+                      print(f"OpenAI API failed: {response.status_code}", file=sys.stderr)
+                      return None
               except Exception as e:
                   print(f"OpenAI API error: {e}", file=sys.stderr)
                   return None
           
-          def generate_test_for_function(func_info, source_code):
-              """Generate test for a single function"""
-              prompt = f"""Generate a comprehensive unit test for the following Go function.
-
-          Package: {func_info['package']}
-          Function: {func_info['signature']}
-          
-          Source code context:
-          ```go
-          {source_code}
-          ```
-          
-          Requirements:
-          1. Use table-driven test pattern where appropriate
-          2. Include edge cases and error scenarios
-          3. Use testify/assert if needed for assertions
-          4. Mock external dependencies
-          5. Follow Go testing best practices
-          6. Return ONLY the test function code, no explanations
-          7. Function name should be Test{func_info['name']}
-          
-          Generate the test code:"""
-              
-              # Try GitHub Copilot first
-              result = call_github_copilot(prompt)
-              if result:
-                  return result
-              
-              # Fallback to OpenAI
-              result = call_openai(prompt)
-              return result
-          
           def extract_code_block(text):
               """Extract Go code from markdown code blocks"""
+              text = text.strip()
               if "```go" in text:
                   parts = text.split("```go")
                   if len(parts) > 1:
@@ -384,68 +288,85 @@ jobs:
                       return code.strip()
               elif "```" in text:
                   parts = text.split("```")
-                  if len(parts) > 1:
+                  if len(parts) > 2:
                       return parts[1].strip()
-              return text.strip()
+              return text
+          
+          def generate_test_for_function(func_info):
+              """Generate test for a single function"""
+              prompt = f"""Generate a comprehensive unit test for this Go function.
+
+Package: {func_info['package']}
+Function: {func_info['name']}
+
+Function code:
+```go
+{func_info['code']}
+```
+
+Requirements:
+1. Use table-driven test pattern where appropriate
+2. Test multiple scenarios including edge cases
+3. Test error conditions if function returns errors
+4. Use standard testing package
+5. Function name should be Test{func_info['name']}
+6. Return ONLY the test function code, no package or import statements
+
+Generate the test code:"""
+              
+              print(f"Generating test for {func_info['name']}...", file=sys.stderr)
+              
+              # Try GitHub Copilot first
+              result = call_github_copilot(prompt)
+              if result:
+                  return result
+              
+              # Fallback to OpenAI
+              print(f"Falling back to OpenAI for {func_info['name']}...", file=sys.stderr)
+              result = call_openai(prompt)
+              return result
           
           def main():
               # Load functions
               with open("/tmp/functions.json", "r") as f:
                   functions = json.load(f)
               
+              if not functions:
+                  print("No functions to process", file=sys.stderr)
+                  return
+              
               generated_tests = {}
               
-              for func in functions:
-                  if not func["is_exported"]:
-                      continue  # Skip unexported functions
-                  
-                  print(f"Generating test for {func['name']}...", file=sys.stderr)
-                  
-                  # Read source code
-                  try:
-                      with open(func["file"], "r") as f:
-                          lines = f.readlines()
-                          start = max(0, func["start_line"] - 5)
-                          end = min(len(lines), func["end_line"] + 5)
-                          source_code = "".join(lines[start:end])
-                  except Exception as e:
-                      print(f"Error reading {func['file']}: {e}", file=sys.stderr)
+              for func_info in functions:
+                  func_name = func_info.get("name", "")
+                  if not func_name:
                       continue
                   
                   # Generate test
-                  test_code = generate_test_for_function(func, source_code)
+                  test_code = generate_test_for_function(func_info)
                   if not test_code:
-                      print(f"Failed to generate test for {func['name']}", file=sys.stderr)
+                      print(f"Failed to generate test for {func_name}", file=sys.stderr)
                       continue
                   
                   # Clean up code
                   test_code = extract_code_block(test_code)
                   
                   # Organize by test file
-                  test_file = func["file"].replace(".go", "_test.go")
+                  test_file = func_info["file"].replace(".go", "_test.go")
                   if test_file not in generated_tests:
                       generated_tests[test_file] = {
-                          "package": func["package"],
-                          "imports": set(),
+                          "package": func_info["package"],
                           "tests": []
                       }
                   
                   generated_tests[test_file]["tests"].append({
-                      "function": func["name"],
+                      "function": func_name,
                       "code": test_code
                   })
               
               # Save generated tests
               with open("/tmp/generated_tests.json", "w") as f:
-                  # Convert sets to lists for JSON serialization
-                  output = {}
-                  for k, v in generated_tests.items():
-                      output[k] = {
-                          "package": v["package"],
-                          "imports": list(v["imports"]),
-                          "tests": v["tests"]
-                      }
-                  json.dump(output, f, indent=2)
+                  json.dump(generated_tests, f, indent=2)
               
               print(f"Generated tests for {len(generated_tests)} files", file=sys.stderr)
           
@@ -460,7 +381,12 @@ jobs:
           python3 /tmp/generate_tests.py
           
           if [ -f /tmp/generated_tests.json ]; then
-            echo "success=true" >> $GITHUB_OUTPUT
+            TEST_COUNT=$(cat /tmp/generated_tests.json | jq 'length')
+            if [ "$TEST_COUNT" -gt 0 ]; then
+              echo "success=true" >> $GITHUB_OUTPUT
+            else
+              echo "success=false" >> $GITHUB_OUTPUT
+            fi
           else
             echo "success=false" >> $GITHUB_OUTPUT
           fi
