@@ -879,3 +879,294 @@ func TestUpdateDynamicTelemetryTimeWindow(t *testing.T) {
 	assert.True(t, updateCalled, "update after interval should proceed")
 	assert.Equal(t, "updated", testTelemetry3.Platform)
 }
+
+func TestCalculateStorageSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		sizeStr       string
+		expectedBytes int64
+		expectError   bool
+		errorContains string
+	}{
+		// Valid sizes with different units
+		{
+			name:          "Gigabytes with Gi",
+			sizeStr:       "10Gi",
+			expectedBytes: 10 * 1024 * 1024 * 1024,
+			expectError:   false,
+		},
+		{
+			name:          "Megabytes with Mi",
+			sizeStr:       "500Mi",
+			expectedBytes: 500 * 1024 * 1024,
+			expectError:   false,
+		},
+		{
+			name:          "Terabytes with Ti",
+			sizeStr:       "1Ti",
+			expectedBytes: 1024 * 1024 * 1024 * 1024,
+			expectError:   false,
+		},
+		{
+			name:          "Kilobytes with Ki",
+			sizeStr:       "100Ki",
+			expectedBytes: 100 * 1024,
+			expectError:   false,
+		},
+		{
+			name:          "Bytes without unit",
+			sizeStr:       "1024",
+			expectedBytes: 1024,
+			expectError:   false,
+		},
+		{
+			name:          "Decimal gigabytes with G",
+			sizeStr:       "10G",
+			expectedBytes: 10 * 1000 * 1000 * 1000,
+			expectError:   false,
+		},
+		{
+			name:          "Decimal megabytes with M",
+			sizeStr:       "500M",
+			expectedBytes: 500 * 1000 * 1000,
+			expectError:   false,
+		},
+		{
+			name:          "Decimal terabytes with T",
+			sizeStr:       "1T",
+			expectedBytes: 1000 * 1000 * 1000 * 1000,
+			expectError:   false,
+		},
+		{
+			name:          "Small size with k (lowercase)",
+			sizeStr:       "100k",
+			expectedBytes: 100 * 1000,
+			expectError:   false,
+		},
+		{
+			name:          "Single byte",
+			sizeStr:       "1",
+			expectedBytes: 1,
+			expectError:   false,
+		},
+		{
+			name:          "Zero bytes",
+			sizeStr:       "0",
+			expectedBytes: 0,
+			expectError:   false,
+		},
+		// Error cases
+		{
+			name:          "Empty string",
+			sizeStr:       "",
+			expectedBytes: 0,
+			expectError:   true,
+			errorContains: "size string cannot be empty",
+		},
+		{
+			name:          "Invalid format - uppercase K",
+			sizeStr:       "100K",
+			expectedBytes: 0,
+			expectError:   true,
+			errorContains: "invalid size format",
+		},
+		{
+			name:          "Invalid format - bad unit",
+			sizeStr:       "10XYZ",
+			expectedBytes: 0,
+			expectError:   true,
+			errorContains: "invalid size format",
+		},
+		{
+			name:          "Invalid format - random string",
+			sizeStr:       "invalid",
+			expectedBytes: 0,
+			expectError:   true,
+			errorContains: "invalid size format",
+		},
+		{
+			name:          "Negative value with unit",
+			sizeStr:       "-10Gi",
+			expectedBytes: 0,
+			expectError:   true,
+			errorContains: "size cannot be negative",
+		},
+		{
+			name:          "Negative value without unit",
+			sizeStr:       "-1024",
+			expectedBytes: 0,
+			expectError:   true,
+			errorContains: "size cannot be negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := CalculateStorageSize(tt.sizeStr)
+
+			if tt.expectError {
+				assert.Error(t, err, "Expected an error but got none")
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains, "Error message should contain expected text")
+				}
+			} else {
+				assert.NoError(t, err, "Expected no error but got: %v", err)
+				assert.Equal(t, tt.expectedBytes, result, "Size mismatch for input %s", tt.sizeStr)
+			}
+		})
+	}
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		expected string
+	}{
+		// Milliseconds (less than a second)
+		{
+			name:     "Zero duration",
+			duration: 0,
+			expected: "0ms",
+		},
+		{
+			name:     "100 milliseconds",
+			duration: 100 * time.Millisecond,
+			expected: "100ms",
+		},
+		{
+			name:     "500 milliseconds",
+			duration: 500 * time.Millisecond,
+			expected: "500ms",
+		},
+		{
+			name:     "999 milliseconds",
+			duration: 999 * time.Millisecond,
+			expected: "999ms",
+		},
+		// Seconds only
+		{
+			name:     "1 second",
+			duration: 1 * time.Second,
+			expected: "1s",
+		},
+		{
+			name:     "30 seconds",
+			duration: 30 * time.Second,
+			expected: "30s",
+		},
+		{
+			name:     "59 seconds",
+			duration: 59 * time.Second,
+			expected: "59s",
+		},
+		// Minutes only
+		{
+			name:     "1 minute",
+			duration: 1 * time.Minute,
+			expected: "1m",
+		},
+		{
+			name:     "30 minutes",
+			duration: 30 * time.Minute,
+			expected: "30m",
+		},
+		{
+			name:     "59 minutes",
+			duration: 59 * time.Minute,
+			expected: "59m",
+		},
+		// Minutes and seconds
+		{
+			name:     "1 minute 30 seconds",
+			duration: 1*time.Minute + 30*time.Second,
+			expected: "1m30s",
+		},
+		{
+			name:     "5 minutes 45 seconds",
+			duration: 5*time.Minute + 45*time.Second,
+			expected: "5m45s",
+		},
+		{
+			name:     "30 minutes 15 seconds",
+			duration: 30*time.Minute + 15*time.Second,
+			expected: "30m15s",
+		},
+		// Hours only
+		{
+			name:     "1 hour",
+			duration: 1 * time.Hour,
+			expected: "1h",
+		},
+		{
+			name:     "2 hours",
+			duration: 2 * time.Hour,
+			expected: "2h",
+		},
+		{
+			name:     "24 hours",
+			duration: 24 * time.Hour,
+			expected: "24h",
+		},
+		// Hours and minutes
+		{
+			name:     "1 hour 30 minutes",
+			duration: 1*time.Hour + 30*time.Minute,
+			expected: "1h30m",
+		},
+		{
+			name:     "2 hours 15 minutes",
+			duration: 2*time.Hour + 15*time.Minute,
+			expected: "2h15m",
+		},
+		{
+			name:     "5 hours 45 minutes",
+			duration: 5*time.Hour + 45*time.Minute,
+			expected: "5h45m",
+		},
+		// Hours, minutes, and seconds (seconds should be ignored)
+		{
+			name:     "1 hour 30 minutes 45 seconds",
+			duration: 1*time.Hour + 30*time.Minute + 45*time.Second,
+			expected: "1h30m",
+		},
+		{
+			name:     "2 hours 0 minutes 30 seconds",
+			duration: 2*time.Hour + 30*time.Second,
+			expected: "2h",
+		},
+		// Edge cases
+		{
+			name:     "Exactly 1 hour (no minutes)",
+			duration: 1 * time.Hour,
+			expected: "1h",
+		},
+		{
+			name:     "1 hour 1 minute",
+			duration: 1*time.Hour + 1*time.Minute,
+			expected: "1h1m",
+		},
+		{
+			name:     "1 minute 1 second",
+			duration: 1*time.Minute + 1*time.Second,
+			expected: "1m1s",
+		},
+		{
+			name:     "Large duration - 100 hours",
+			duration: 100 * time.Hour,
+			expected: "100h",
+		},
+		{
+			name:     "Large duration - 100 hours 30 minutes",
+			duration: 100*time.Hour + 30*time.Minute,
+			expected: "100h30m",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := FormatDuration(tt.duration)
+			assert.Equal(t, tt.expected, result, "FormatDuration(%v) = %s, expected %s", tt.duration, result, tt.expected)
+		})
+	}
+}
