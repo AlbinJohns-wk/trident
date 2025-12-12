@@ -337,3 +337,4 @@ operator_manifest
 chart
 installer
 all
+*.out
